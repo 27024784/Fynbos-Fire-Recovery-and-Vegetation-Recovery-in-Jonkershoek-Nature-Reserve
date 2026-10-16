@@ -1,0 +1,355 @@
+## ====================================================================================================
+## Post-fire NDVI recovery, Jonkershoek (fire of 21 Feb 2021)
+## Exponential recovery model without a seasonal term:  NDVI(t) = alpha + gamma * (1 - e^(-t / lambda))
+## ====================================================================================================
+
+## ---- 0. Setup -----------------------------------------------------------------
+## Requires: tidyverse, patchwork, and MASS (MASS comes with R)
+## install.packages("tidyverse", "patchwork") 
+install.packages("patchwork")
+install.packages("tidyverse")
+library(tidyverse)
+
+
+## ---- 1. Load data -------------------------------------------------------------
+## Semicolon-separated, decimal POINTS (only the unused time_start column has commas). Check str(ndvi): NDVI and years_since_fire must be "num".
+ndvi <- read.csv("Jonkershoek_NDVI_quarterly.csv", sep = ";",
+                 stringsAsFactors = FALSE)
+ndvi$date <- as.Date(ndvi$date, format = "%Y/%m/%d")
+str(ndvi)
+names(ndvi)
+
+## >>> EDIT these two to match the column names printed by names(ndvi) <<<
+ndvi_col <- "NDVI"
+t_col    <- "years_since_fire"
+
+stopifnot(is.numeric(ndvi[[ndvi_col]]), is.numeric(ndvi[[t_col]]))
+
+pre  <- ndvi[ndvi$period == "pre-fire",  ]
+post <- ndvi[ndvi$period == "post-fire", ]
+
+dat <- data.frame(t = post[[t_col]], y = post[[ndvi_col]], date = post$date)
+dat <- dat[complete.cases(dat), ]
+dat <- dat[order(dat$t), ]
+nrow(dat)                      # number of post-fire observations
+summary(dat)
+
+pre_ndvi <- mean(pre[[ndvi_col]], na.rm = TRUE)   # pre-fire baseline
+pre_ndvi
+
+## ---- 2. Quick look at the data ------------------------------------------------
+ggplot(dat, aes(t, y)) +
+  geom_point() +
+  geom_hline(yintercept = pre_ndvi, linetype = "dashed") +
+  labs(x = "Time since fire (years)", y = "Mean NDVI")
+
+# day of year (1-366) from the Date column
+dat$doy <- as.numeric(format(dat$date, "%j"))
+
+# angle around the annual cycle
+dat$w <- 2 * pi * dat$doy / 365.25
+
+head(dat)
+range(dat$doy)
+
+
+## ---- 3. The linear model (model 1) --------------------------------------------
+fit_lin <- lm(y ~ t, data = dat)
+
+summary(fit_lin)
+AIC(fit_lin)
+
+ggplot(dat, aes(t, y)) +
+  geom_point() +
+  geom_line(aes(y = fitted(fit_lin)), colour = "red")
+
+## ---- 4. Exponential recovery, no seasonality (model 2) ------------------------
+start_exp <- list(alpha = min(dat$y),          # lowest observed y
+                  gam   = max(dat$y) - min(dat$y),          # range of y: max minus min
+                  lambda = 1)
+
+fit_exp <- nls(y ~ alpha + gam * (1 - exp(-t / lambda)),               # write the model using alpha, gam, lambda, t
+               data  = dat,
+               start = start_exp)
+
+summary(fit_exp)
+AIC(fit_exp)
+confint(fit_exp)       # 95% CIs for your results table (may need library(MASS) on older R)
+
+## Add the fitted curve to the plot, next to the linear model
+ggplot(dat, aes(t, y)) +
+  geom_point() +
+  geom_hline(yintercept = pre_ndvi, linetype = "dashed") +
+  geom_line(aes(y = fitted(fit_lin)), colour = "red") +
+  geom_line(aes(y = fitted(fit_exp)), colour = "blue") +
+  labs(x = "Time since fire (years)", y = "Mean NDVI")
+
+## ---- 5. Full model, exponential recovery + seasonality (model 3) --------------
+## NDVI(t) = alpha + gam*(1 - exp(-t/lambda)) + b1*sin(w) + b2*cos(w)
+dat$s <- sin(dat$w)
+dat$c <- cos(dat$w)
+
+start_sea <- list(alpha  = min(dat$y),
+                  gam    = max(dat$y) - min(dat$y),
+                  lambda = 1,
+                  b1     = 0,
+                  b2     = 0)
+
+fit_sea <- nls(y ~ alpha + gam * (1 - exp(-t / lambda)) + b1 * s + b2 * c,
+               data  = dat,
+               start = start_sea)
+
+summary(fit_sea)
+confint(fit_sea)
+
+## Recover amplitude and phase from b1, b2
+b1 <- coef(fit_sea)["b1"]
+b2 <- coef(fit_sea)["b2"]
+A   <- sqrt(b1^2 + b2^2)
+phi <- atan2(b2, b1)
+A; phi
+
+## Plateau and recovery time
+alpha  <- coef(fit_sea)["alpha"]
+gam    <- coef(fit_sea)["gam"]
+lambda <- coef(fit_sea)["lambda"]
+plateau <- alpha + gam
+RT      <- lambda * log(200 * gam)
+plateau; RT
+
+## Compare all three models
+AIC(fit_lin, fit_exp, fit_sea)
+
+## Plot all three
+ggplot(dat, aes(t, y)) +
+  geom_point() +
+  geom_hline(yintercept = pre_ndvi, linetype = "dashed") +
+  geom_line(aes(y = fitted(fit_lin)), colour = "red") +
+  geom_line(aes(y = fitted(fit_exp)), colour = "blue") +
+  geom_line(aes(y = fitted(fit_sea)), colour = "darkgreen", linewidth = 1) +
+  labs(x = "Time since fire (years)", y = "Mean NDVI")
+
+## ---- 6.a Residual diagnostics for the full model--------------------------------
+dat$res    <- resid(fit_sea)
+dat$fitted <- fitted(fit_sea)
+
+## (a) Residuals over time: any leftover pattern?
+ggplot(dat, aes(t, res)) +
+  geom_point() +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(x = "Time since fire (years)", y = "Residual (NDVI)")
+
+## (b) Residuals vs fitted: is the spread constant?
+ggplot(dat, aes(fitted, res)) +
+  geom_point() +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(x = "Fitted NDVI", y = "Residual (NDVI)")
+
+## (c) Normality
+qqnorm(dat$res); qqline(dat$res)
+shapiro.test(dat$res)
+
+## (d) Autocorrelation: are neighbouring residuals related?
+acf(dat$res, main = "ACF of residuals")
+
+## Biggest misses
+dat[order(-abs(dat$res)), ][1:5, c("t", "date", "y", "fitted", "res")]
+
+## ---- 6.b All residual diagnostics on one plot----------------------------------
+library(patchwork)
+
+dat$res    <- resid(fit_sea)
+dat$fitted <- fitted(fit_sea)
+sw <- shapiro.test(dat$res)
+
+## (a) Residuals over time
+pa <- ggplot(dat, aes(t, res)) +
+  geom_point() +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(x = "Time since fire (years)", y = "Residual (NDVI)",
+       title = "Residuals over time")
+
+## (b) Residuals vs fitted
+pb <- ggplot(dat, aes(fitted, res)) +
+  geom_point() +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(x = "Fitted NDVI", y = "Residual (NDVI)",
+       title = "Residuals vs fitted")
+
+## (c) Normal Q-Q
+pc <- ggplot(dat, aes(sample = res)) +
+  stat_qq() +
+  stat_qq_line() +
+  labs(x = "Theoretical quantiles", y = "Sample quantiles",
+       title = "Normal Q-Q",
+       subtitle = paste0("Shapiro-Wilk p = ", signif(sw$p.value, 2)))
+
+## (d) Autocorrelation of residuals
+a      <- acf(dat$res, plot = FALSE)
+acf_df <- data.frame(lag = a$lag[-1], acf = a$acf[-1])
+bound  <- qnorm(0.975) / sqrt(nrow(dat))
+
+pd <- ggplot(acf_df, aes(lag, acf)) +
+  geom_hline(yintercept = 0) +
+  geom_hline(yintercept = c(-bound, bound), linetype = "dashed", colour = "blue") +
+  geom_segment(aes(xend = lag, yend = 0)) +
+  labs(x = "Lag", y = "ACF", title = "Autocorrelation of residuals")
+
+## Combine into a 2 x 2 grid with A-D labels
+diag_fig <- (pa | pb) / (pc | pd) +
+  plot_annotation(tag_levels = "A") &
+  theme_bw(base_size = 11)
+
+diag_fig
+ggsave("Figure_S1_residual_diagnostics.png", diag_fig,
+       width = 9, height = 7, dpi = 300)
+
+## Residual-versus-time and residuals-versus-fitted plots
+pa <- ggplot(dat, aes(t, res)) +
+  geom_point() +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(x = "Time since fire (years)", y = "Residual (NDVI)")
+
+pb <- ggplot(dat, aes(fitted, res)) +
+  geom_point() +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(x = "Fitted NDVI", y = "Residual (NDVI)")
+
+res_fig <- (pa | pb) + plot_annotation(tag_levels = "A") & theme_bw()
+res_fig
+
+ggsave("Figure_S1_residuals.png", res_fig, width = 9, height = 4, dpi = 300)
+
+## ---- 7. Sensitvity to the 5 largest negative residuals ------------------------
+drop_idx <- order(dat$res)[1:5]          # the 5 most negative residuals
+dat_s    <- dat[-drop_idx, ]
+
+fit_sea_s <- nls(y ~ alpha + gam * (1 - exp(-t / lambda)) + b1 * s + b2 * c,
+                 data  = dat_s,
+                 start = start_sea)
+
+summary(fit_sea_s)
+shapiro.test(resid(fit_sea_s))
+
+## Compare key quantities, full data vs. 5 points removed
+get_summary <- function(f) {
+  p <- coef(f)
+  c(alpha   = unname(p["alpha"]),
+    gam     = unname(p["gam"]),
+    lambda  = unname(p["lambda"]),
+    A       = unname(sqrt(p["b1"]^2 + p["b2"]^2)),
+    plateau = unname(p["alpha"] + p["gam"]),
+    RT      = unname(p["lambda"] * log(200 * p["gam"])))
+}
+round(rbind(full = get_summary(fit_sea),
+            drop5 = get_summary(fit_sea_s)), 4)
+
+## ---- 8. Results tables for the report -----------------------------------------
+## 8a. Parameter table (full model)
+sm <- summary(fit_sea)$coefficients
+ci <- confint(fit_sea)
+tab_par <- data.frame(Parameter = rownames(sm),
+                      Estimate  = sm[, "Estimate"],
+                      SE        = sm[, "Std. Error"],
+                      CI_low    = ci[, 1],
+                      CI_high   = ci[, 2],
+                      row.names = NULL)
+tab_par[, -1] <- round(tab_par[, -1], 4)
+tab_par
+
+## 8b. Model comparison
+aic_tab <- AIC(fit_lin, fit_exp, fit_sea)
+aic_tab$dAIC   <- aic_tab$AIC - min(aic_tab$AIC)
+aic_tab$weight <- exp(-aic_tab$dAIC / 2) / sum(exp(-aic_tab$dAIC / 2))
+round(aic_tab, 3)
+
+## 8c. Derived quantities with 95% intervals by simulation
+##     (draw parameter sets from the fitted model's covariance matrix)
+set.seed(1)
+sims <- MASS::mvrnorm(10000, mu = coef(fit_sea), Sigma = vcov(fit_sea))
+sims <- sims[sims[, "gam"] > 0.005 & sims[, "lambda"] > 0, ]   # RT needs gam > 0.005
+
+derive <- function(p) {
+  p   <- matrix(p, ncol = 5, dimnames = list(NULL, names(coef(fit_sea))))
+  phi <- atan2(p[, "b2"], p[, "b1"])
+  cbind(A         = sqrt(p[, "b1"]^2 + p[, "b2"]^2),
+        plateau   = p[, "alpha"] + p[, "gam"],
+        half_life = p[, "lambda"] * log(2),
+        RT        = p[, "lambda"] * log(200 * p[, "gam"]),
+        peak_doy  = ((pi / 2 - phi) %% (2 * pi)) / (2 * pi) * 365.25)
+}
+
+est  <- derive(coef(fit_sea))
+sims_d <- derive(sims)
+tab_der <- data.frame(Quantity = colnames(est),
+                      Estimate = round(as.numeric(est), 3),
+                      CI_low   = round(apply(sims_d, 2, quantile, 0.025), 3),
+                      CI_high  = round(apply(sims_d, 2, quantile, 0.975), 3),
+                      row.names = NULL)
+tab_der
+
+citation("tidyverse")
+citation("patchwork")
+
+
+date;time_start;days_since_fire;years_since_fire;period;NDVI;coverage;valid_pixels
+2021/01/25;1,61153E+12;-27.0;-0.07392197125256673;pre-fire;0.5778106505303148;1.0045356616396417;283488
+2021/03/16;1,61585E+12;23.0;0.06297056810403832;post-fire;0.21289632492282679;0.973728597346638;274794
+2021/04/10;1,61801E+12;48.0;0.13141683778234087;post-fire;0.25483781144470197;1.0045356616396417;283488
+2021/05/10;1,6206E+12;78.0;0.2135523613963039;post-fire;0.35331665968523596;1.0045356616396417;283488
+2021/05/30;1,62233E+12;98.0;0.2683093771389459;post-fire;0.43355094651332804;1.0045356616396417;283488
+2021/07/19;1,62665E+12;148.0;0.405201916495551;post-fire;0.2544628765459689;0.9846815115092414;277885
+2021/08/03;1,62795E+12;163.0;0.4462696783025325;post-fire;0.4896694128434026;1.0045285746683297;283486
+2021/09/02;1,63054E+12;193.0;0.5284052019164955;post-fire;0.4367826720943812;1.0045356616396417;283488
+2021/09/22;1,63227E+12;213.0;0.5831622176591376;post-fire;0.44401795903869024;1.0045356616396417;283488
+2021/10/27;1,63529E+12;248.0;0.6789869952087612;post-fire;0.435759805930695;1.0045356616396417;283488
+2021/11/21;1,63745E+12;273.0;0.7474332648870636;post-fire;0.43202624620830093;0.9543776221793854;269333
+2021/12/31;1,64091E+12;313.0;0.8569472963723477;post-fire;0.45146810246892743;1.0045356616396417;283488
+2022/01/30;1,6435E+12;343.0;0.9390828199863107;post-fire;0.44327498758728995;1.0045356616396417;283488
+2022/02/24;1,64566E+12;368.0;1.0075290896646132;post-fire;0.44484385919365155;1.0045356616396417;283488
+2022/03/21;1,64782E+12;393.0;1.0759753593429158;post-fire;0.47389507274059817;1.0045356616396417;283488
+2022/05/05;1,65171E+12;438.0;1.1991786447638604;post-fire;0.5364327150964846;1.0045214876970179;283484
+2022/06/04;1,6543E+12;468.0;1.2813141683778233;post-fire;0.4940703685401763;1.0045356616396417;283488
+2022/06/29;1,65646E+12;493.0;1.3497604380561259;post-fire;0.6285742490198769;1.0045250311826737;283485
+2022/07/24;1,65862E+12;518.0;1.4182067077344285;post-fire;0.6506070844113381;0.9972396246739993;281429
+2022/08/23;1,66121E+12;548.0;1.5003422313483916;post-fire;0.5900351814963173;1.0045250311826737;283485
+2022/10/02;1,66467E+12;588.0;1.6098562628336757;post-fire;0.5260415426037568;1.0045356616396417;283488
+2022/10/22;1,6664E+12;608.0;1.6646132785763177;post-fire;0.5153460295975686;1.0045356616396417;283488
+2022/11/21;1,66899E+12;638.0;1.7467488021902806;post-fire;0.48762512198687413;1.0045356616396417;283488
+2022/12/21;1,67158E+12;668.0;1.8288843258042438;post-fire;0.48778340471886555;1.0045356616396417;283488
+2023/01/25;1,6746E+12;703.0;1.9247091033538672;post-fire;0.5024580715823447;1.0045356616396417;283488
+2023/03/01;1,67763E+12;738.0;2.020533880903491;post-fire;0.5044802693082644;1.0045356616396417;283488
+2023/03/31;1,68022E+12;768.0;2.102669404517454;post-fire;0.5652013519629093;1.0045356616396417;283488
+2023/04/30;1,68281E+12;798.0;2.184804928131417;post-fire;0.6477407411937256;1.0045250311826737;283485
+2023/07/04;1,68843E+12;863.0;2.3627652292950034;post-fire;0.6967157794797374;0.9780339324186416;276009
+2023/08/03;1,69102E+12;893.0;2.4449007529089664;post-fire;0.6278661592229223;1.0045214876970179;283484
+2023/09/07;1,69404E+12;928.0;2.54072553045859;post-fire;0.6028888480524207;1.0045321181539857;283487
+2023/09/27;1,69577E+12;948.0;2.595482546201232;post-fire;0.5988709093735718;1.0045356616396417;283488
+2023/10/22;1,69793E+12;973.0;2.6639288158795345;post-fire;0.5810329326771613;1.0045356616396417;283488
+2023/11/26;1,70096E+12;1008.0;2.759753593429158;post-fire;0.5262913550823787;1.0045356616396417;283488
+2023/12/21;1,70312E+12;1033.0;2.8281998631074607;post-fire;0.5113940028209344;1.0045356616396417;283488
+2024/01/25;1,70614E+12;1068.0;2.924024640657084;post-fire;0.48282724509915637;1.0045356616396417;283488
+2024/03/10;1,71003E+12;1113.0;3.047227926078029;post-fire;0.5293174498673328;1.0045356616396417;283488
+2024/03/30;1,71176E+12;1133.0;3.1019849418206706;post-fire;0.5534236968758375;1.0045356616396417;283488
+2024/05/09;1,71521E+12;1173.0;3.2114989733059547;post-fire;0.653312725146951;1.0045356616396417;283488
+2024/05/29;1,71694E+12;1193.0;3.266255989048597;post-fire;0.5215618454216948;1.0045356616396417;283488
+2024/06/23;1,7191E+12;1218.0;3.3347022587268995;post-fire;0.6998305419155794;1.0045250311826737;283485
+2024/07/23;1,72169E+12;1248.0;3.4168377823408624;post-fire;0.6650794064939488;1.0045144007257059;283482
+2024/09/11;1,72601E+12;1298.0;3.5537303216974676;post-fire;0.5511030652100853;1.0045356616396417;283488
+2024/09/21;1,72688E+12;1308.0;3.5811088295687883;post-fire;0.5509927418538114;1.0045356616396417;283488
+2024/10/26;1,7299E+12;1343.0;3.676933607118412;post-fire;0.5178823092898451;1.0045356616396417;283488
+2024/11/30;1,73292E+12;1378.0;3.7727583846680357;post-fire;0.5303442324455414;1.0045356616396417;283488
+2024/12/25;1,73508E+12;1403.0;3.8412046543463383;post-fire;0.5386088856587866;1.0045356616396417;283488
+2025/01/24;1,73768E+12;1433.0;3.923340177960301;post-fire;0.5189831953714718;1.0045356616396417;283488
+2025/03/15;1,742E+12;1483.0;4.060232717316906;post-fire;0.504730947342561;1.0045356616396417;283488
+2025/04/04;1,74372E+12;1503.0;4.114989733059549;post-fire;0.5620823415546016;1.0045285746683297;283486
+2025/04/24;1,74545E+12;1523.0;4.16974674880219;post-fire;0.6205271554882014;1.0045321181539857;283487
+2025/06/13;1,74977E+12;1573.0;4.306639288158795;post-fire;0.5322559133714694;1.0045356616396417;283488
+2025/07/08;1,75193E+12;1598.0;4.375085557837098;post-fire;0.5014241829057936;1.0045356616396417;283488
+2025/07/28;1,75366E+12;1618.0;4.42984257357974;post-fire;0.6925225672567398;1.0045321181539857;283487
+2025/09/06;1,75712E+12;1658.0;4.539356605065024;post-fire;0.6090429142308126;1.0045321181539857;283487
+2025/09/26;1,75884E+12;1678.0;4.594113620807666;post-fire;0.5822948286693811;1.0045356616396417;283488
+2025/11/05;1,7623E+12;1718.0;4.70362765229295;post-fire;0.5631269464518234;1.0045356616396417;283488
+2025/11/25;1,76403E+12;1738.0;4.758384668035592;post-fire;0.5383991762480635;1.0045356616396417;283488
+2025/12/30;1,76705E+12;1773.0;4.854209445585216;post-fire;0.5079624807617324;1.0045356616396417;283488
+
