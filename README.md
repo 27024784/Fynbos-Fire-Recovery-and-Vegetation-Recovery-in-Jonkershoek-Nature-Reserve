@@ -7,7 +7,7 @@ Data: Sentinel-2 Level-2A surface reflectance (Harmonized collection,
 `COPERNICUS/S2_SR_HARMONIZED`), accessed through Google Earth Engine.
 
 ## Files
-- `ndvi_recovery.js` – Google Earth Engine script that extracts quarterly NDVI
+- `ndvi_recovery.js` – Google Earth Engine script that extracts NDVI
 - `Jonkershoek_NDVI_quarterly.csv` – NDVI data exported from Earth Engine
 - `ndvi_models.R` – fits the linear, exponential and seasonal recovery models
 
